@@ -1,0 +1,5 @@
+### General Snakemake settings ###
+latency-wait: 60
+keep-going: True
+rerun-incomplete: True
+scheduler: greedy

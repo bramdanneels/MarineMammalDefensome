@@ -1,0 +1,646 @@
+import string
+import numpy as np
+import scipy as sp
+import pandas as pd
+import matplotlib
+import seaborn as sns
+from os.path import exists
+from itertools import groupby, combinations
+import re
+matplotlib.use('agg')
+
+genome_folder = config["genome_folder"].rstrip("/")
+genome_suffix = config["genome_suffix"]
+annot_folder = config["annot_folder"].rstrip("/")
+gff_suffix = config["annot_suffix"]
+ref_folder = config["ref_folder"].rstrip("/")
+refprot_suffix = config["ref_suffix"]
+
+#Check which genomes to analyse and get their prefixes
+genomes, = glob_wildcards(genome_folder+"/{genome}"+genome_suffix)
+print("Genomes")
+print("\t".join(genomes))
+
+#Preload genepatters for filtering
+genes_any = config["genes_any"]
+anygenes = set()
+for line in open(genes_any, "r"):
+    gene = line.strip()
+    anygenes.add(gene.lower())
+genes_letter = config["genes_letter"]
+lettergenes = set()
+for line in open(genes_letter, "r"):
+    gene = line.strip()
+    lettergenes.add(gene.lower())
+genes_number = config["genes_number"]
+numbergenes = set()
+for line in open(genes_number, "r"):
+    gene = line.strip()
+    numbergenes.add(gene.lower())
+
+def get_defensome_alignments(wildcards):
+    ck_output = checkpoints.get_aln_combo.get(**wildcards).output[0]
+    combos = set()
+    for line in open(ck_output):
+        gene, og, tophit, ratio, pid = line.strip().split()
+        if tophit != "-":
+            if float(ratio) >= config["lengthCutoff"] and float(pid) >= config["percID_cutoff"]:
+                genome = gene.split("_")[0]
+                combos.add(f"{genome}/{gene}__{tophit}")
+    gene_alignments = expand("results/pseudoAlignments/{combo}.{method}", combo=sorted(list(combos)), method=["gw2", "exo", "mnp"])
+    return(gene_alignments)
+
+def checkPseudoMP(MPoutput):
+    for line in open(MPoutput):
+        if not line[:5] in ["##ATA", "##AAS", "##AQA"]:
+            aln = line.strip().split()
+            fs = aln[15].split(":")[-1]
+            st = aln[16].split(":")[-1]
+            return(st, fs)
+    return(False)
+
+def checkPseudoExo(exonerateoutput):
+    with open(exonerateoutput, "r") as file:
+        filecontent = file.read()
+    alignments = filecontent.split("C4 Alignment:\n")[1:]
+    bestscore = 0
+    best_alignment = False
+    for alignment in alignments:
+        for line in alignment.split("\n"):
+            if "Raw score:" in line:
+                score = int(line.strip().split()[2])
+                if score > bestscore:
+                    bestscore = score
+                    best_alignment = alignment
+                break
+    if best_alignment:
+        protseq = ""
+        inserts = 0
+        deletions = 0
+        sugar = False
+        for number, line in enumerate(best_alignment.split("\n")):
+            if "sugar:" in line:
+                sugar=True
+            if number-5 > 0 and number%5 == 0 and not sugar:
+                protseq += line.strip()
+        protseq = protseq.strip().rstrip("***").replace(" ", "").replace("+", "").replace("{", "").replace("}", "").replace("-", "").replace("##", "#")
+        stop = protseq.count("***")
+        protseq = "".join([c for c, _ in groupby(protseq)])
+        shift = protseq.count("#")
+        return(str(stop), str(shift))
+    else:
+        return(False)
+
+def checkPseudoGW(genewiseoutput):
+    with open(genewiseoutput, "r") as file:
+        filecontent = file.read()
+    alignments = filecontent.strip().split("genewise output\n")
+    bestscore = 0
+    best_alignment = False
+    for alignment in alignments:
+        for line in alignment.split("\n"):
+            if "Score" in line and "over entire alignment" in line:
+                score = float(line.lstrip("Score ").rstrip(" bits over entire alignment\n"))
+                if score > bestscore:
+                    bestscore = score
+                    best_alignment = alignment
+                break
+    if best_alignment:
+        protseq = ""
+        seqend = False
+        for number, line in enumerate(best_alignment.split("\n")):
+            if "//" in line:
+                seqend = True
+                break
+            if number > 0 and number%8 == 0 and not seqend:
+                protseq += line.strip()
+        table = str.maketrans('', '', string.ascii_lowercase)
+        protseq = protseq.translate(table).replace(" ", "").replace("-:-", "").replace("[", "").replace("]", "").replace(":-", "").replace("-:", "").replace(":", "")
+        stop = protseq.count("X")
+        shift = protseq.count("!")
+        return(str(stop), str(shift))
+    else:
+        return(False)
+
+def testAnnot(name):
+    for pattern in anygenes:
+        if name.startswith(pattern):
+            return(True)
+    for pattern in lettergenes:
+        if name.startswith(pattern):
+            if name.removeprefix(pattern):
+                next_char = name.removeprefix(pattern)[0]
+                if not next_char.isdigit():
+                    return(True)
+            else:
+                return(True)
+    for pattern in numbergenes:
+        if name.startswith(pattern):
+            if name.removeprefix(pattern):
+                next_char = name.removeprefix(pattern)[0]
+            else:
+                next_char = "1"
+            if next_char.isdigit():
+                return(True)
+    return(False)
+
+def genomeinput(genome_suffix):
+    if genome_suffix.endswith(".gz"):
+        return("results/annotation/{genome}.genome.fasta")
+    else:
+        return("genomes/{genome}"+genome_suffix)
+
+rule all:
+    input:
+        "results/orthology/all.ortho.annot",
+        get_defensome_alignments,
+        "results/overview/stats.tsv"
+
+rule decompress:
+    input:
+        fastagz = "genomes/{genome}"+genome_suffix
+    output:
+        fasta = temporary("results/annotation/{genome}.genome.fasta")
+    shell:
+        r"""
+        pigz -c -d {input.fastagz} > {output.fasta}
+        """
+   
+rule get_longest_iso_gff:
+    input:
+        gff = annot_folder+"/{genome}"+gff_suffix
+    output:
+        gff = "results/annotation/{genome}.longestIso.gff"
+    shell:
+        r"""
+        agat_sp_keep_longest_isoform.pl --gff {input.gff} -o {output.gff} > /dev/null
+        sed "s/=/={wildcards.genome}_/g" -i {output.gff}
+        mv {wildcards.genome}.agat.log results/annotation/{wildcards.genome}.agat.gff.log
+        """
+
+rule get_longest_iso_prot:
+    input:
+        gff = rules.get_longest_iso_gff.output.gff,
+        genome = genomeinput(genome_suffix)
+    output:
+        prot = "results/annotation/{genome}.longestIso.prot.fasta"
+    shell:
+        r"""
+        agat_sp_extract_sequences.pl -g {input.gff} -f {input.genome} -t cds -p -o {output.prot} > /dev/null
+        mv {wildcards.genome}.longestIso.agat.log results/annotation/{wildcards.genome}.agat.prot.log
+        """
+        
+rule orthofinder:
+    input:
+        proteins = expand(rules.get_longest_iso_prot.output.prot, genome=genomes)
+    output:
+        ortho_txt = "results/orthology/all.ortho.txt"
+    threads:
+        int(config["max_threads"])
+    shell:
+        r"""
+        mkdir -p results/orthology/proteins
+        for file in {input.proteins};
+          do ln -sf ${{PWD}}/$file results/orthology/proteins/;
+          done
+        ln -sf ${{PWD}}/{ref_folder}/*{refprot_suffix} results/orthology/proteins/
+        orthofinder \
+          -t {threads} \
+          -a {threads} \
+          -o results/orthology/orthofinder \
+          -n "orthofinder" \
+          -f results/orthology/proteins/
+        mv results/orthology/orthofinder/Results_orthofinder/* results/orthology/orthofinder/
+        rm -r results/orthology/orthofinder/Results_orthofinder
+        cp results/orthology/orthofinder/Orthogroups/Orthogroups.txt {output.ortho_txt}
+        """
+
+rule eggnog:
+    input:
+        expand(rules.get_longest_iso_prot.output.prot, genome=genomes)
+    output:
+        annotations = "results/eggNOG/allGenomes.emapper.annotations",
+        temp_prot = temporary("results/eggNOG/temp.allProts.fasta"),
+        short_annot = "results/eggNOG/allGenomes.annots"
+    params:
+        evalue = config["eggnog_evalue"],
+        proteomes = " ".join([f"results/annotation/{genome}.longestIso.prot.fasta" for genome in genomes])
+    threads:
+        int(config["max_threads"])
+    shell:
+        r"""
+        cat {params.proteomes} {ref_folder}/*{refprot_suffix} > {output.temp_prot}
+        emapper.py \
+         --override \
+         --dbmem \
+         --cpu {threads} \
+         --evalue {params.evalue} \
+         -i results/eggNOG/temp.allProts.fasta \
+         --output_dir results/eggNOG \
+         -o allGenomes
+        grep -v "^#" results/eggNOG/allGenomes.emapper.annotations \
+        | cut -f 1,9 \
+        | awk -v OFS='\t' '{{$2 = tolower($2); print}}' \
+        > {output.short_annot}
+        """
+
+rule orthofinder_annot:
+    input:
+        orthogroups = rules.orthofinder.output.ortho_txt,
+        eggnogAnnot = rules.eggnog.output.short_annot
+    output:
+        orthoannot = "results/orthology/all.ortho.annot",
+        orthogroups = "results/orthology/all.ortho.groups"
+    run:
+        eggnogannot = {}
+        for line in open(input.eggnogAnnot):
+            gene, name = line.strip().split()
+            eggnogannot[gene] = name
+        orthodict = {}
+        for line in open(input.orthogroups):
+            OG, *genes = line.strip().split()
+            OG = OG.rstrip(":")
+            orthodict[OG] = orthodict.get(OG, [])
+            orthodict[OG].extend(genes)
+        OUT = open(output.orthoannot, "w+")
+        OUTg = open(output.orthogroups, "w+")
+        for ortho in sorted(orthodict.keys()):
+            eggnognames = [eggnogannot.get(gene, "-") for gene in orthodict[ortho]]
+            most_common_annot = max(set(eggnognames), key=eggnognames.count)
+            if most_common_annot == "-" and len(set(eggnognames)) > 1:
+                eggnognames = [name for name in eggnognames if name != "-" ]
+                most_common_annot = max(set(eggnognames), key=eggnognames.count)
+            print(ortho, most_common_annot, ",".join([eggnogannot.get(gene, "-") for gene in sorted(orthodict[ortho])]), sep="\t", file=OUT)
+            print(ortho, *sorted(orthodict[ortho]), sep="\t", file=OUTg)
+        OUT.close()
+        OUTg.close()
+
+checkpoint filter_ortho:
+    input:
+        annot = rules.orthofinder_annot.output.orthoannot,
+        ogs = rules.orthofinder_annot.output.orthogroups
+    output:
+        filter_annot = "results/filtered/ortho.annot",
+        filter_ogs = "results/filtered/ortho.groups"
+    run:
+        ogs = set()
+        OUT = open(output.filter_annot, "w+")
+        for line in open(input.annot):
+            ortho, annot, annots = line.strip().split()
+            if testAnnot(annot):
+                ogs.add(ortho)
+                print(line.strip(), file=OUT)
+        OUT.close()        
+        OUT = open(output.filter_ogs, "w+")
+        for line in open(input.ogs):
+            ortho, *genes = line.strip().split()
+            if ortho in ogs:
+                print(line.strip(), file=OUT)
+        OUT.close()
+
+rule create_diamond_db:
+    output:
+        db = temporary("results/blastp/temp.all.db.dmnd")
+    threads:
+        int(config["diamond_threads"])
+    shell:
+        r"""
+        cat refs/*fasta > results/blastp/temp.all.fasta
+        diamond makedb \
+          --threads {threads} \
+          --in results/blastp/temp.all.fasta \
+          -d {output.db}
+        rm results/blastp/temp.all.fasta
+        """
+
+rule diamond:
+    input:
+        proteins = rules.get_longest_iso_prot.output.prot,
+        db = rules.create_diamond_db.output.db
+    output:
+        blastp = "results/blastp/{genome}_ref.blastp"
+    params:
+        evalue = config["diamond_evalue"]
+    threads:
+        int(config["diamond_threads"])
+    shell:
+        r"""
+        diamond blastp \
+          --threads {threads} \
+          --db {input.db} \
+          --query {input.proteins} \
+          --out {output.blastp} \
+          --evalue {params.evalue} \
+          --outfmt 6 qseqid sseqid qlen slen pident length mismatch gapopen qstart qend sstart send evalue bitscore
+        """
+
+rule diamond_besthit:
+    input:
+        expand(rules.diamond.output.blastp, genome=genomes)
+    output:
+        besthits = "results/blastp/hits.lst"
+    run:
+        OUT = open(output.besthits, "w+")
+        for file in input:
+            for line in open(file):
+                gene, refgene, genelen, reflen, percid, *rest = line.strip().split()
+                ratio = round(int(genelen)/int(reflen), 2)
+                pid = round(float(percid), 2)
+                print(gene, refgene, ratio, pid, sep="\t", file=OUT)
+        OUT.close()
+
+checkpoint get_aln_combo:
+    input:
+        ogs = rules.filter_ortho.output.filter_ogs,
+        besthits = rules.diamond_besthit.output.besthits
+    output:
+        genes = "results/filtered/gene_aln.combo"
+    run:
+        besthits = {}
+        for line in open(input.besthits):
+            gene, hit, ratio, pid = line.strip().split()
+            besthits[gene] = besthits.get(gene, [])
+            besthits[gene].append((hit, ratio, pid))
+        OUT = open(output.genes, "w+")
+        for line in open(input.ogs):
+            og, *genes = line.strip().split()
+            for gene in genes:
+                if gene in besthits.keys():
+                    printhit = False
+                    for hit, ratio, pid in besthits[gene]:
+                        if hit in genes: 
+                            print(gene, og, hit, ratio, pid, sep="\t", file=OUT)
+                            printhit = True
+                            break
+                    if not printhit:
+                        print(gene, og, "-", "-", "-", sep="\t", file=OUT)
+                elif gene.split("_")[0] in genomes:
+                    print(gene, og, "-", "-", "-", sep="\t", file=OUT)
+        OUT.close()
+
+rule getGeneLocations:
+    input:
+        gff = rules.get_longest_iso_gff.output.gff
+    output:
+        geneLoc = "results/pseudoAlignments/{genome}.genelocations"
+    run:
+        OUT = open(output.geneLoc, "w+")
+        for line in open(input.gff):
+            if not line.startswith("#"):
+                chrom, source, feat, start, stop, dot, strand, sdot, info = line.strip().split("\t")
+                if feat == "mRNA":
+                    gene = info.split(";")[0].removeprefix("ID=")
+                    print(gene, 
+                      chrom, 
+                      min(int(start), int(stop)), 
+                      max(int(start), int(stop)),
+                      sep="\t",
+                      file=OUT)
+        OUT.close()
+
+rule extractGenomicRegion:
+    input:
+        genome = "genomes/{genome}"+genome_suffix,
+        geneLoc = rules.getGeneLocations.output.geneLoc
+    output:
+        region = temporary("results/pseudoAlignments/{genome}/{gene}.fasta")
+    params:
+        padding = int(config["genePadding"])
+    run:
+        OUT = open(f"tempBED_{wildcards.genome}_{wildcards.gene}.bed", "w+")
+        for line in open(input.geneLoc):
+            if wildcards.gene in line:
+                gene, contig, start, stop = line.strip().split("\t")
+                print(f"{contig}\t{int(start)-params.padding}\t{int(stop)+params.padding}",
+                file=OUT)
+                break
+        OUT.close()
+        shell(f"seqtk subseq {input.genome} tempBED_{wildcards.genome}_{wildcards.gene}.bed > {output.region}")
+        shell(f"rm tempBED_{wildcards.genome}_{wildcards.gene}.bed")
+
+rule merge_refs:
+    output:
+        merged_refs = "results/pseudoAlignments/allRef.fasta"
+    shell:
+        r"""
+        cat {ref_folder}/*{refprot_suffix} > {output.merged_refs}
+        """
+
+rule get_ref_prot:
+    input:
+        refs = rules.merge_refs.output.merged_refs
+    output:
+        refProt = "results/pseudoAlignments/refprots/{prot}.faa"
+    shell:
+        r"""
+        mkdir -p tmp
+        echo "{wildcards.prot}" > tmp/{wildcards.prot}.tmp
+        seqtk subseq {input.refs} tmp/{wildcards.prot}.tmp > {output.refProt}
+        rm tmp/{wildcards.prot}.tmp
+        """
+
+rule run_genewise:
+    input:
+        region = rules.extractGenomicRegion.output.region,
+        refProt = rules.get_ref_prot.output.refProt
+    output:
+        genewise = "results/pseudoAlignments/{genome}/{gene}__{prot}.gw2"
+    shell:
+        r"""
+        mkdir -p results/pseudoAlignments/{wildcards.genome}
+        genewise \
+          -both \
+          -silent \
+          {input.refProt} \
+          {input.region} \
+        > {output.genewise} \
+        || touch {output.genewise}
+        """
+
+rule run_exonerate:
+    input:
+        region = rules.extractGenomicRegion.output.region,
+        refProt = rules.get_ref_prot.output.refProt
+    output:
+        exonerate = "results/pseudoAlignments/{genome}/{gene}__{prot}.exo"
+    shell:
+        r"""
+        mkdir -p results/pseudoAlignments/{wildcards.genome}
+        exonerate \
+          --model protein2genome \
+          --verbose 0 \
+          {input.refProt} \
+          {input.region} \
+        > {output.exonerate} \
+        || touch {output.exonerate}
+        """
+
+rule run_miniprot:
+    input:
+        region = rules.extractGenomicRegion.output.region,
+        refProt = rules.get_ref_prot.output.refProt
+    output:
+        miniprot = "results/pseudoAlignments/{genome}/{gene}__{prot}.mnp"
+    params:
+        miniprot = config["miniprot_bin"]
+    shell:
+        r"""
+        mkdir -p results/pseudoAlignments/{wildcards.genome}
+        {params.miniprot} -t1 --aln {input.region} {input.refProt} > {output.miniprot}
+        """
+
+rule pseudo_info:
+    input:
+        get_defensome_alignments,
+        ogs = rules.filter_ortho.output.filter_ogs,
+        combos = rules.get_aln_combo.output.genes
+    output:
+        pseudo = "results/filtered/pseudostates.tbl"
+    run:
+        combos = {}
+        for line in open(input.combos):
+            gene, og, tophit, lratio, pid = line.strip().split()
+            combos[(gene, og)] = [tophit, lratio, pid]
+        OUT = open(output.pseudo, "w+")
+        for line in open(input.ogs):
+            og, *genes = line.strip().split()
+            for gene in sorted(genes):
+                if gene.split("_")[0] in genomes:
+                    tophit, lratio, pid = combos[(gene, og)]
+                    if tophit != "-":
+                        if float(lratio) >= config["lengthCutoff"] and float(pid) >= config["percID_cutoff"]:
+                            genome = gene.split("_")[0]
+                            gw2 = checkPseudoGW(f"results/pseudoAlignments/{genome}/{gene}__{combos[(gene, og)][0]}.gw2")
+                            if gw2 == False:
+                                gw2 = 0
+                            else:
+                                gw2 = sum([int(x) for x in gw2])
+                            exo = checkPseudoExo(f"results/pseudoAlignments/{genome}/{gene}__{combos[(gene, og)][0]}.exo")
+                            if exo == False:
+                                exo = 0
+                            else:
+                                exo = sum([int(x) for x in exo])
+                            mnp = checkPseudoMP(f"results/pseudoAlignments/{genome}/{gene}__{combos[(gene, og)][0]}.mnp")
+                            if mnp:
+                                mnp = sum([int(x) for x in mnp])
+                            else:
+                                mnp = 0
+                        if float(lratio) < config["lengthCutoff"]:
+                            pseudo = "Pseudo"
+                        elif float(pid) < config["percID_cutoff"]:
+                            pseudo = "Pseudo"
+                        elif [exo, gw2, mnp].count(0) <= 1:
+                            pseudo = "Pseudo"
+                        else:
+                            pseudo = "Func"
+                    else:
+                        gw2 = "-"
+                        exo = "-"
+                        mnp = "-"
+                        pseudo = "Func"
+                    print(gene, og, pseudo, *combos[(gene, og)], gw2, exo, mnp, sep="\t", file=OUT)
+        OUT.close()
+
+rule og_summary:
+    input:
+        annot = rules.orthofinder_annot.output.orthoannot,
+        ogs = rules.filter_ortho.output.filter_ogs,
+        pseudo = rules.pseudo_info.output.pseudo,
+    output:
+        counts = "results/overview/genecounts.tbl"
+    run:
+        annotdict = {}
+        for line in open(input.annot):
+            og, annot, *annots = line.strip().split()
+            annotdict[og] = annot
+        pseudodict = {}
+        for line in open(input.pseudo):
+            gene, og, pseudo, *rest = line.strip().split()
+            pseudodict[(gene, og)] = pseudo
+        OUT = open(output.counts, "w+")
+        print("Orthogroup", "Annot", *sorted(genomes), sep="\t", file=OUT)
+        for line in open(input.ogs):
+            og, *genes = line.strip().split()
+            genomedict = {}
+            for genome in genomes:
+                genomedict[genome] = 0
+            for gene in genes:
+                if gene.split("_")[0] in genomes:
+                    if pseudodict[(gene, og)] == "Func":
+                        genome = gene.split("_")[0]
+                        genomedict[genome] += 1
+            print(og, annotdict[og], *[genomedict[genome] for genome in sorted(genomes)], sep="\t", file=OUT)
+        OUT.close()
+
+rule run_statistics:
+    input:
+        overview = rules.og_summary.output.counts
+    output:
+        stats = "results/overview/stats.tsv"
+    params:
+        genomeMap = config["genomeMap"]
+    run:
+        #Create dataframe
+        genetable = pd.read_table(input.overview, header=0, index_col=0)
+        genetableT = genetable.transpose().iloc[0:]
+        species = pd.read_table(params.genomeMap, header=None, sep='\s+')
+        validSpecies = species[species[0].isin(genetable.columns)]
+        speciesDict = validSpecies.set_index(0).T.to_dict('index')[1]
+        lineageDict = {}
+        for species in sorted(speciesDict.keys()):
+            lineage = speciesDict[species]
+            lineageDict[lineage] = lineageDict.get(lineage, set())
+            lineageDict[lineage].add(species)
+        genetableT['lineage'] = pd.Series(speciesDict)
+        #Initiate final dataframe
+        comparisons = sorted(list(combinations(sorted(list(lineageDict.keys())), 2)))
+        genes = genetableT.columns
+        genes = genes.drop("lineage")
+        final = pd.DataFrame(index=genes)
+        final["Annot"] = genetable["Annot"]
+        #Calculate counts/properties
+        lineage_prop = {}
+        lineage_mean = {}
+        lineage_pres = {}
+        lineage_abs = {}
+        lineage_max = {}
+        for lineage in lineageDict.keys():
+            linmax = len(lineageDict[lineage])
+            counts = genetableT[genetableT["lineage"] == lineage].drop("lineage", axis=1)
+            lineage_prop[lineage] = round(((counts > 0).sum(axis=0)/linmax), 2)
+            lineage_mean[lineage] = counts.mean(axis=0)
+            lineage_pres[lineage] = (counts > 0).sum(axis=0)
+            lineage_abs[lineage] = (counts == 0).sum(axis=0)
+            lineage_max[lineage] = linmax
+        for lineage in sorted(list(lineageDict.keys())):
+            final[lineage+"_max"] = lineage_max[lineage]
+            final[lineage+"_pres"] = lineage_pres[lineage]
+            final[lineage+"_abs"] = lineage_abs[lineage]
+            final[lineage+"_prop"] = lineage_prop[lineage]
+            final[lineage+"_mean"] = [round(x, 2) for x in lineage_mean[lineage]]
+        #Perform statistical tests
+        for comp in comparisons:
+            lin1, lin2 = comp
+            lin1Tbl = genetableT[genetableT["lineage"] == lin1]
+            lin2Tbl = genetableT[genetableT["lineage"] == lin2]
+            fisherpdict = {}
+            fisherpvalues = []
+            mwupdict = {}
+            mwupvalues = []
+            for gene in genes:
+                con_table = [[final.loc[gene][lin1+"_pres"], final.loc[gene][lin1+"_abs"]], [final.loc[gene][lin2+"_pres"], final.loc[gene][lin2+"_abs"]]]
+                fisher = sp.stats.fisher_exact(con_table).pvalue
+                fisherpdict[gene] = round(fisher, 5)
+                fisherpvalues.append(fisher)
+                mwu = sp.stats.mannwhitneyu(list(lin1Tbl[gene]), list(lin2Tbl[gene]), method="auto").pvalue
+                mwupdict[gene] = round(mwu, 5)
+                mwupvalues.append(mwu)
+            fisheradjpvalues = [round(x, 5) for x in sp.stats.false_discovery_control(fisherpvalues)]
+            mwuadjpvalues = [round(x, 5) for x in sp.stats.false_discovery_control(mwupvalues)]
+            final["_".join(comp)+"_Fisherpval"] = pd.Series(fisherpdict)
+            final["_".join(comp)+"_Fisheradjp"] = fisheradjpvalues
+            final["_".join(comp)+"_MWUpval"] = pd.Series(mwupdict)
+            final["_".join(comp)+"_MWUadjp"] = mwuadjpvalues
+        #Print output    
+        final.to_csv(output.stats, sep="\t")
+

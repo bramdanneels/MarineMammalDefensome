@@ -1,0 +1,33 @@
+#max amount of threads to use for a rule
+diamond_threads: 16
+max_threads: 64
+
+#input data
+genome_folder: "genomes/"
+genome_suffix: ".fasta.gz"
+annot_folder: "annotations/"
+annot_suffix: ".gff"
+ref_folder: "refs/"
+ref_suffix: ".fasta"
+
+#patterns for genenames for filtering
+genes_any: "profile/pattern.any"
+genes_letter: "profile/pattern.letter"
+genes_number: "profile/pattern.number"
+
+#e-values used for diamond and eggnog
+diamond_evalue: 1e-10
+eggnog_evalue: 1e-10
+
+#cutoffs to determine low-quality gene matches
+percID_cutoff: 50
+lengthCutoff: 0.5
+
+#number of basepairs around a gene that will be extracted for pseudogene alignment
+genePadding: 25000
+
+#species table with grouping for statistical comparison
+genomeMap: "profile/SpeciesOverview.tsv"
+
+#location of miniprot binary
+miniprot_bin: "miniprot"
