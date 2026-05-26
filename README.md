@@ -5,7 +5,7 @@ The analysis pipeline is implemented in Snakemake, and all necessary software ca
 
 ## Overview of the pipeline
 
-Include figure from the paper here.
+![Defensome pipeline overview](https://github.com/bramdanneels/MarineMammalDefensome/blobl/main/images/DefensomePipeline.png)
 
 The pipeline identifies and compares the gene inventory of the chemical defensome of the input genomes. It goes through the following steps:
 
@@ -19,7 +19,7 @@ Input: annotated genomes, list of defensome genes, reference proteome
 6. Summarize orthogroup information, including functional annotation and pseudogene information
 7. Calculate comparative statistics of chemical defensome gene presence between different input lineages
 
-A more detailed description of the analysis pipeline can be found in the [publication]().
+A more detailed description of the analysis pipeline can be found in the [preprint](https://www.biorxiv.org/content/10.64898/2026.05.21.726804v1).
 
 ## Installation and setup
 
@@ -41,7 +41,7 @@ The pipeline requires the following inputs:
 
 The file prefix of the query genome sequences and annotation files should be the same (e.g. OrcinusOrca.fasta and OrcinusOrca.gff).
 The file prefix will also be used to link the genome to a lineage in the correspondence table.
-The correspondence table is a tab-separated file with the genome names in the first column, and their corresponding lineage in the second column (e.g. [here](profile/SpeciesOverview.txt))
+The correspondence table is a tab-separated file with the genome names in the first column, and their corresponding lineage in the second column (e.g. [here](profile/SpeciesOverview.tsv))
 The patterns used for the chemical defensome genes are found in the [profile](profile) folder (`pattern.any`, `pattern.letter`, and `patter.number`).
 If you want to use a set of custom gene names, see the ["Adapting the pipeline for other genes" section](##Adapting-the-pipeline-for-other-genes).
 
@@ -79,8 +79,8 @@ Computational paramters:
 Other (optional):
 - `miniprot_bin`: path to the miniprot binary, if different than the default (default = "miniprot").
  
-[^1] After removal of the suffix, only the identifying prefix should remain, which identifies the genome throughout the analysis. Genome sequences can be compressed (in `.gz` format). However, during the analysis the genomes will be temporary decompressed.
-[^2] After removal of the suffix, only the identifying prefix should remain. This prefix should match a prefix of a genome sequence. Annotation files cannot be compressed.
+[^1]: After removal of the suffix, only the identifying prefix should remain, which identifies the genome throughout the analysis. Genome sequences can be compressed (in `.gz` format). However, during the analysis the genomes will be temporary decompressed.
+[^2]: After removal of the suffix, only the identifying prefix should remain. This prefix should match a prefix of a genome sequence. Annotation files cannot be compressed.
 
 The settings for Snakemake itself, are defined in the [config.yaml](profile/config.yaml) file.
 
@@ -167,7 +167,7 @@ If you want to consider all genes in the analysis, you could include all letters
 
 ## References and citation
 
-This pipeline was developed for the study on the marine mammal chemical defensome, described [here]().
+This pipeline was developed for the study on the marine mammal chemical defensome, described [here](https://www.biorxiv.org/content/10.64898/2026.05.21.726804v1).
 
 If using this pipeline in your own work, please cite both this github page and the reference manscript linked above.
 Please also consider citing the software on which the pipeline is build on:
