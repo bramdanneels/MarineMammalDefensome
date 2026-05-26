@@ -5,7 +5,7 @@ The analysis pipeline is implemented in Snakemake, and all necessary software ca
 
 ## Overview of the pipeline
 
-![Defensome pipeline overview](https://github.com/bramdanneels/MarineMammalDefensome/blob/main/images/DefensomePipeline.png)
+![Defensome pipeline overview](https://github.com/bramdanneels/MarineMammalDefensome/blob/main/images/DefensomeWorkflow2.png)
 
 The pipeline identifies and compares the gene inventory of the chemical defensome of the input genomes. It goes through the following steps:
 
